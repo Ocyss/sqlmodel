@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect as pyinspect
 import ipaddress
 import uuid
 import weakref
+from collections.abc import MutableMapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -390,6 +392,13 @@ def Field(
     schema_extra: Optional[Dict[str, Any]] = None,
 ) -> Any:
     current_schema_extra = schema_extra or {}
+
+    if description:
+        if isinstance(sa_column_kwargs, MutableMapping):
+            sa_column_kwargs["comment"] = description
+        else:
+            sa_column_kwargs = {"comment": description}
+
     field_info = FieldInfo(
         default,
         default_factory=default_factory,
@@ -576,6 +585,40 @@ class SQLModelMetaclass(ModelMetaclass, DeclarativeMeta):
             # TODO: remove this in the future
             set_config_value(model=new_cls, parameter="read_with_orm_mode", value=True)
 
+            args = []
+            args_dict: dict[str, Any] = {}
+            comment = get_config("comment")
+            if comment is not Undefined:
+                args_dict["comment"] = comment
+
+            for c in reversed(new_cls.__mro__):
+                if c in (object, type, BaseModel, SQLModel):
+                    continue
+                if not hasattr(c, "__table_args__"):
+                    continue
+                c_table_args_attr = c.__table_args__
+                if isinstance(c_table_args_attr, declared_attr):
+                    c_table_args_attr = c_table_args_attr.fget(new_cls)
+                elif callable(c_table_args_attr):
+                    c_table_args_attr = c_table_args_attr(new_cls)
+                if isinstance(c_table_args_attr, tuple):
+                    for item in c_table_args_attr:
+                        if isinstance(item, dict):
+                            args_dict.update(item)
+                        else:
+                            args.append(item)
+                elif isinstance(c_table_args_attr, dict):
+                    args_dict.update(c_table_args_attr)
+
+            for k, v in list(args_dict.items()):
+                if k.startswith("__") and k.endswith("__"):
+                    args.append(v)
+                    del args_dict[k]
+            if len(args) > 0 or len(args_dict) > 0:
+                new_cls.__table_args__ = (
+                    (*args, args_dict) if len(args_dict) > 0 else tuple(args)
+                )
+
         config_registry = get_config("registry")
         if config_registry is not Undefined:
             config_registry = cast(registry, config_registry)
@@ -659,6 +702,10 @@ def get_sqlalchemy_type(field: Any) -> Any:
     metadata = get_field_metadata(field)
 
     # Check enums first as an enum can also be a str, needed by Pydantic/FastAPI
+    if pyinspect.isclass(type_) and isinstance(
+        pyinspect.getattr_static(type_, "__get_sa_type__", None), classmethod
+    ):
+        return type_.__get_sa_type__()
     if issubclass(type_, Enum):
         return sa_Enum(type_)
     if issubclass(
