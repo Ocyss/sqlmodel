@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     AbstractSet,
+    Annotated,
     Any,
     Callable,
     ClassVar,
@@ -26,6 +27,8 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    get_args,
+    get_type_hints,
     overload,
 )
 
@@ -585,6 +588,21 @@ class SQLModelMetaclass(ModelMetaclass, DeclarativeMeta):
             # TODO: remove this in the future
             set_config_value(model=new_cls, parameter="read_with_orm_mode", value=True)
 
+            merge_keys = set()
+            for c in new_cls.__mro__:
+                if c in (object, type, BaseModel, SQLModel):
+                    continue
+                try:
+                    c_hints = get_type_hints(c, include_extras=True)
+                except Exception:
+                    continue
+
+                for attr_name, attr_type in c_hints.items():
+                    if get_origin(attr_type) is Annotated:
+                        if "merge" in get_args(attr_type)[1:]:
+                            merge_keys.add(attr_name)
+
+            merged_data = {key: set() for key in merge_keys}
             args = []
             args_dict: dict[str, Any] = {}
             comment = get_config("comment")
@@ -594,6 +612,14 @@ class SQLModelMetaclass(ModelMetaclass, DeclarativeMeta):
             for c in reversed(new_cls.__mro__):
                 if c in (object, type, BaseModel, SQLModel):
                     continue
+
+                current_vars = vars(c)
+                for key in merge_keys:
+                    if key in current_vars:
+                        val = current_vars[key]
+                        if isinstance(val, (set, list, tuple)):
+                            merged_data[key].update(val)
+
                 if not hasattr(c, "__table_args__"):
                     continue
                 c_table_args_attr = c.__table_args__
@@ -618,6 +644,8 @@ class SQLModelMetaclass(ModelMetaclass, DeclarativeMeta):
                 new_cls.__table_args__ = (
                     (*args, args_dict) if len(args_dict) > 0 else tuple(args)
                 )
+            for key, value in merged_data.items():
+                setattr(new_cls, key, value)
 
         config_registry = get_config("registry")
         if config_registry is not Undefined:
